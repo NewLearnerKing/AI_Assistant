@@ -1,0 +1,5 @@
+.env
+memory/
+sanya-tts/
+__pycache__/
+logs/
