@@ -67,7 +67,7 @@ def route_command(command: str) -> str:
 
 def handle_code_project(response: dict) -> str:
     try:
-        language = response.get("language")
+        language = response.get("language", "python")
         steps = response.get("steps", [])
         files = response.get("files", [])
         run = response.get("run", False)
@@ -81,54 +81,55 @@ def handle_code_project(response: dict) -> str:
         with open("logs/sanya.log", "a", encoding="utf-8") as log_file:
             log_file.write(f"[TaskManager] Created project directory: {project_dir}\n")
 
-        # Initial file creation (if any files are provided in the first response)
+        # Initial file creation
+        initial_files = {}
         for file in files:
             filename = file.get("filename")
             content = file.get("content", "")
-            full_path = os.path.join(project_dir, filename)
+            full_path = os.path.join(project_dir, os.path.normpath(filename))  # Normalize path
             create_file(full_path, content)
+            initial_files[filename] = full_path
 
         result = f"Project '{project_name}' created.\n"
 
-        # Iterate over steps, calling ask_llm for each step
+        # Iterate over steps
         for i, step in enumerate(steps, 1):
-            print(f"[TaskManager] Processing step {i}: {step}")
+            step_desc = step["step"] if isinstance(step, dict) else step
+            step_output = step.get("output", "Generate relevant code") if isinstance(step, dict) else "Generate relevant code"
+            print(f"[TaskManager] Processing step {i}: {step_desc}")
             with open("logs/sanya.log", "a", encoding="utf-8") as log_file:
-                log_file.write(f"[TaskManager] Processing step {i}: {step}\n")
+                log_file.write(f"[TaskManager] Processing step {i}: {step_desc}\n")
 
-            # Prepare context: read existing files
             existing_files = search_files("*", project_dir)
-            file_contents = []
-            for file_path in existing_files:
-                content = read_file(file_path)
-                file_contents.append(f"File: {file_path}\nContent:\n{content}\n")
+            file_contents = {os.path.basename(f): read_file(f) for f in existing_files}
 
-            # Call ask_llm for this step, passing previous results
-            previous_response = "\n".join(file_contents) if file_contents else "No files generated yet."
-            step_prompt = f"Complete step {i} of the task: {step}\nOriginal prompt: {response.get('original_prompt', '')}"
-            step_response = ask_llm(step_prompt, iteration=i, previous_response=previous_response)
+            step_prompt = f"Complete step {i}: {step_desc}\nExpected output: {step_output}\nExisting files: {json.dumps(file_contents)}\nGenerate the required content and return it in a code_project task. Do not prompt the user."
+            step_response = ask_llm(step_prompt, iteration=i, previous_response=json.dumps(file_contents))
 
             if "error" in step_response:
                 result += f"\nStep {i} failed: {step_response['error']}"
                 continue
 
             if "task" in step_response and step_response["task"] == "code_project":
-                # Update files based on this step's response
                 new_files = step_response.get("files", [])
                 for file in new_files:
                     filename = file.get("filename")
                     content = file.get("content", "")
-                    full_path = os.path.join(project_dir, filename)
+                    full_path = os.path.join(project_dir, os.path.normpath(filename))
+                    # Append or replace based on step logic
+                    if os.path.exists(full_path):
+                        existing_content = read_file(full_path)
+                        if content and not content.startswith(existing_content):  # Avoid overwriting unrelated content
+                            content = existing_content + "\n" + content
                     create_file(full_path, content)
-                result += f"\nStep {i} completed: {step}"
+                result += f"\nStep {i} completed: Updated {len(new_files)} files."
             else:
                 result += f"\nStep {i} response: {step_response.get('reply', 'No reply.')}"
 
-
-        # Run the code if requested
+        # Run and test logic remains the same
         if run:
             if language == "python":
-                main_file = next((f["filename"] for f in search_files("*.py", project_dir)), None)
+                main_file = next((f for f in search_files("*.py", project_dir)), None)
                 if main_file:
                     full_path = os.path.join(project_dir, main_file)
                     exec_result = run_python_script(full_path)
@@ -144,14 +145,13 @@ def handle_code_project(response: dict) -> str:
                 else:
                     result += f"\nFailed to serve web app: {web_result['validation']}"
 
-        # Test the code if requested
         if test:
             if language == "python" and run:
-                main_file = next((f["filename"] for f in search_files("*.py", project_dir)), None)
+                main_file = next((f for f in search_files("*.py", project_dir)), None)
                 if main_file:
                     full_path = os.path.join(project_dir, main_file)
                     test_cases = [
-                        {"input": "5", "expected": "120"},  # Example for factorial
+                        {"input": "5", "expected": "120"},
                         {"input": "0", "expected": "1"}
                     ]
                     test_result = test_python_script(full_path, test_cases)
@@ -159,22 +159,15 @@ def handle_code_project(response: dict) -> str:
                         result += "\nTest Passed: All test cases passed."
                     else:
                         result += f"\nTest Failed:\n{test_result['feedback']}"
-                        # Re-iterate with LLM to fix
-                        fix_prompt = f"Fix the script based on test feedback:\n{test_result['feedback']}"
-                        fix_response = ask_llm(fix_prompt, iteration=len(steps) + 1, previous_response=result)
+                        fix_response = ask_llm(f"Fix the script based on: {test_result['feedback']}", iteration=len(steps) + 1)
                         if "task" in fix_response and fix_response["task"] == "edit_file":
-                            edit_file(
-                                os.path.join(project_dir, fix_response["filename"]),
-                                fix_response["content"]
-                            )
-                            result += "\nAttempted to fix script. Re-running tests..."
+                            edit_file(full_path, fix_response["content"])
                             test_result = test_python_script(full_path, test_cases)
                             if test_result["passed"]:
                                 result += "\nFixed: All test cases passed."
                             else:
                                 result += f"\nFix Failed:\n{test_result['feedback']}"
             elif language == "web":
-                # Validation already done in serve_web_app
                 pass
 
         return result

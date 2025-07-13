@@ -19,12 +19,22 @@ def reason(prompt: str) -> list:
     """
     try:
         response = model.generate_content(reasoning_prompt).text.strip()
+        print(f"[LLM] Raw reasoning response: {response}")  # Debug log
+        response = re.sub(r'^```json\s*|\s*```$', '', response).strip()
+        response = re.sub(r'\\(?![nrt"\\])', '', response)  # Remove invalid escapes
+        if not response.startswith("{"):
+            raise json.JSONDecodeError("No JSON object found", response, 0)
         return json.loads(response).get("steps", [])
+    except json.JSONDecodeError as e:
+        print(f"[LLM] Reasoning error (JSON Decode): {str(e)}. Using default steps.")
+        with open("logs/sanya.log", "a", encoding="utf-8") as log_file:
+            log_file.write(f"[LLM] Reasoning error (JSON Decode): {str(e)}. Raw response: {response}\n")
+        return ["1. Analyze the prompt", "2. Generate initial code", "3. Test and refine"]
     except Exception as e:
-        print(f"[LLM] Reasoning error: {str(e)}")
+        print(f"[LLM] Reasoning error: {str(e)}. Using default steps.")
         with open("logs/sanya.log", "a", encoding="utf-8") as log_file:
             log_file.write(f"[LLM] Reasoning error: {str(e)}\n")
-        return []
+        return ["1. Analyze the prompt", "2. Generate initial code", "3. Test and refine"]
 
 def ask_llm(prompt: str, iteration: int = 0, previous_response: str = None) -> dict:
     try:
